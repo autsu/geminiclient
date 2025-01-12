@@ -3,7 +3,7 @@ package geminiclient
 import (
 	"context"
 
-	"cloud.google.com/go/vertexai/genai"
+	"github.com/google/generative-ai-go/genai"
 )
 
 // CountPromptTokensWithClient counts the tokens in the given text prompt using a specific client and model.

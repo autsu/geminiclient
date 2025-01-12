@@ -2,27 +2,27 @@ package geminiclient_test
 
 import (
 	"fmt"
-	"os"
+	//"os"
 	"strings"
 	"testing"
 
-	"github.com/xyproto/env/v2"
+	//"github.com/xyproto/env/v2"
 	"github.com/xyproto/geminiclient"
 )
 
 var projectID string
 
-func TestMain(m *testing.M) {
-	// Check the project ID once before running any tests
-	projectID = env.StrAlt("GCP_PROJECT_ID", "PROJECT_ID", "")
-	if projectID == "" {
-		fmt.Println(geminiclient.ErrGoogleCloudProjectID)
-		os.Exit(1)
-	}
+// func TestMain(m *testing.M) {
+// 	// Check the project ID once before running any tests
+// 	projectID = env.StrAlt("GCP_PROJECT_ID", "PROJECT_ID", "")
+// 	if projectID == "" {
+// 		fmt.Println(geminiclient.ErrGoogleCloudProjectID)
+// 		os.Exit(1)
+// 	}
 
-	// Run the tests
-	os.Exit(m.Run())
-}
+// 	// Run the tests
+// 	os.Exit(m.Run())
+// }
 
 func TestCustomFunction(t *testing.T) {
 	gc := geminiclient.MustNew()
@@ -162,3 +162,20 @@ func TestAddURLInvalid(t *testing.T) {
 		t.Errorf("Expected error '%s', but got: %v", expectedErr, err)
 	}
 }
+
+// func TestFuncMetadataToSchema(t *testing.T) {
+// 	v := geminiclient.FuncMetadataToSchema(geminiclient.FuncMetadata{
+// 		"location": geminiclient.Property{
+// 			Description: "xxx",
+// 			Type:        genai.TypeString,
+// 			Required:    true,
+// 		},
+// 		"unit": geminiclient.Property{
+// 			Description: "xxx",
+// 			Type:        genai.TypeString,
+// 			Required:    false,
+// 		},
+// 	})
+// 	t.Logf("%+v", v)
+// 	panic(1)
+// }
