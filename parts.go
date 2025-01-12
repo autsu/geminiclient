@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"cloud.google.com/go/vertexai/genai"
+	"github.com/google/generative-ai-go/genai"
 )
 
 // AddImage reads an image from a file, prepares it for processing,
@@ -52,7 +52,7 @@ func (gc *GeminiClient) MustAddImage(filename string) {
 func (gc *GeminiClient) AddURI(URI string) {
 	gc.Parts = append(gc.Parts, genai.FileData{
 		MIMEType: mime.TypeByExtension(filepath.Ext(URI)),
-		FileURI:  URI,
+		URI:      URI,
 	})
 }
 

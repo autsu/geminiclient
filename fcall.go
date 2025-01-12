@@ -8,16 +8,98 @@ import (
 	"reflect"
 	"strings"
 
-	"cloud.google.com/go/vertexai/genai"
+	"github.com/google/generative-ai-go/genai"
 )
 
+type FuncMetadataManager struct {
+	Fms map[string]*FuncMetadata
+}
+
+func (fmm *FuncMetadataManager) AddFunction(fm *FuncMetadata) {
+	if fm == nil {
+		panic("BUG: func metadata is nil")
+	}
+	fm.init()
+	fmm.Fms[fm.FnName] = fm
+}
+
 var ErrEmptyPrompt = errors.New("empty prompt")
+
+type Property struct {
+	Description string
+	Type        genai.Type
+	Required    bool
+}
+
+type FuncMetadata struct {
+	Fn       any                 // 函数
+	FnName   string              // 函数名
+	FnDesc   string              // 函数描述
+	Args     map[string]Property // 函数参数描述
+	RetNames []string            // 函数返回值名称
+
+	fnType  reflect.Type
+	fnValue reflect.Value
+}
+
+func (fm *FuncMetadata) init() {
+	if fm.Fn == nil {
+		panic("BUG: fm.Fn is nil")
+	}
+	fm.fnType = reflect.TypeOf(fm.Fn)
+	if fm.fnType.Kind() != reflect.Func {
+		panic("BUG: Fn is not a function")
+	}
+	fm.fnValue = reflect.ValueOf(fm.Fn)
+}
+
+// 函数参数描述
+// key: 参数名
+// value:
+// type FuncMetadata map[string]Property
+func (f *FuncMetadata) FuncMetadataToSchema() *genai.Schema {
+	ret := &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{}}
+	for k, v := range f.Args {
+		ret.Properties[k] = &genai.Schema{
+			Type:        v.Type,
+			Description: v.Description,
+		}
+		if v.Required {
+			ret.Required = append(ret.Required, k)
+		}
+	}
+	return ret
+}
+
+type FunctionCall func(req map[string][]Property) (resp map[string]any, err error)
 
 // FunctionCallHandler defines a callback type for handling function responses.
 type FunctionCallHandler func(response map[string]any) (map[string]any, error)
 
+func (gc *GeminiClient) AddFunctionToolNew(fm *FuncMetadata) error {
+	if fm == nil {
+		panic("BUG: func metadata is nil")
+	}
+	fm.init()
+	gc.FuncMetadataManager.AddFunction(fm)
+
+	schema := fm.FuncMetadataToSchema()
+	functionDecl := &genai.FunctionDeclaration{
+		Name:        fm.FnName,
+		Description: fm.FnDesc,
+		Parameters:  schema,
+	}
+
+	tool := &genai.Tool{
+		FunctionDeclarations: []*genai.FunctionDeclaration{functionDecl},
+	}
+	gc.Tools = append(gc.Tools, tool)
+
+	return nil
+}
+
 // AddFunctionTool registers a custom Go function as a tool that the model can call.
-func (gc *GeminiClient) AddFunctionTool(name, description string, fn interface{}) error {
+func (gc *GeminiClient) AddFunctionTool(name, description string, fn any) error {
 	fnValue := reflect.ValueOf(fn)
 	fnType := fnValue.Type()
 
@@ -32,6 +114,12 @@ func (gc *GeminiClient) AddFunctionTool(name, description string, fn interface{}
 		paramType := fnType.In(i)
 		paramName := fmt.Sprintf("param%d", i+1)
 
+		// 貌似无法通过反射拿到参数名，所以这里塞的就是 param1, param2 这样的东西
+		// 也无法提供 Description 信息
+		// 这样似乎会影响 genmini 调用时提供参数的准确性
+		// 比如我有一个获取气温的函数，两个参数分别是 location 和 unit
+		// prompt 是 "今天上海的气温是多少摄氏度？然后你的任务是根据今天的天气来安排鲜花的存储。"
+		// genmini 会传递 location=上海 unit=今天，unit 明显传递内容有误
 		parameters[paramName] = &genai.Schema{
 			Type: mapGoTypeToGenaiType(paramType),
 		}
@@ -93,7 +181,11 @@ func (gc *GeminiClient) MultiQueryWithCallbacks(prompt string, base64Data, dataM
 	for _, candidate := range res.Candidates {
 		for _, part := range candidate.Content.Parts {
 			if funcall, ok := part.(genai.FunctionCall); ok {
-				responseData, err := gc.invokeFunction(funcall.Name, funcall.Args)
+				fm := gc.FuncMetadataManager.Fms[funcall.Name]
+				if fm == nil {
+					return "", fmt.Errorf("function %s not found", funcall.Name)
+				}
+				responseData, err := gc.invokeFunction(funcall, fm)
 				if err != nil {
 					return "", fmt.Errorf("failed to handle function call: %v", err)
 				}
@@ -187,30 +279,46 @@ func (gc *GeminiClient) MultiQueryWithSequentialCallbacks(prompt string, callbac
 }
 
 // invokeFunction uses reflection to call the appropriate user-defined function based on the AI's request.
-func (gc *GeminiClient) invokeFunction(name string, args map[string]any) (map[string]any, error) {
-	fn, exists := gc.Functions[name]
-	if !exists {
-		return nil, fmt.Errorf("function %s not found", name)
+func (gc *GeminiClient) invokeFunction(fc genai.FunctionCall, fm *FuncMetadata) (map[string]any, error) {
+	if fm == nil {
+		return nil, fmt.Errorf("BUG: fm is nil")
 	}
 
-	fnType := fn.Type()
-
-	in := make([]reflect.Value, fnType.NumIn())
-	for i := 0; i < fnType.NumIn(); i++ {
-		paramName := fmt.Sprintf("param%d", i+1)
-		argValue, exists := args[paramName]
-		if !exists {
-			return nil, fmt.Errorf("missing argument: %s", paramName)
-		}
-		in[i] = reflect.ValueOf(argValue)
+	// 检查 genai.FunctionCall 提供的参数是否与实际函数参数匹配
+	fnType := fm.fnType
+	NumParam := len(fc.Args)
+	if NumParam != fnType.NumIn() {
+		return nil, fmt.Errorf("function %s has %d parameters, but %d arguments were provided", fm.FnName, fnType.NumIn(), NumParam)
 	}
 
-	out := fn.Call(in)
-
-	result := make(map[string]any)
-	for i := 0; i < len(out); i++ {
-		result[fmt.Sprintf("return%d", i+1)] = out[i].Interface()
+	in := make([]reflect.Value, 0, NumParam)
+	for _, v := range fc.Args {
+		in = append(in, reflect.ValueOf(v))
 	}
+
+	// in := make([]reflect.Value, fnType.NumIn())
+	// for i := 0; i < fnType.NumIn(); i++ {
+	// 	paramName := fmt.Sprintf("param%d", i+1)
+	// 	argValue, exists := args[paramName]
+	// 	if !exists {
+	// 		return nil, fmt.Errorf("missing argument: %s", paramName)
+	// 	}
+	// 	in[i] = reflect.ValueOf(argValue)
+	// }
+
+	out := fm.fnValue.Call(in)
+	if len(out) < 1 {
+		return nil, fmt.Errorf("function %s returned no value", fm.FnName)
+	}
+	if out[0].Kind() != reflect.Map {
+		return nil, fmt.Errorf("function %s returned a non-map value", fm.FnName)
+	}
+	result := out[0].Interface().(map[string]any)
+	//result := make(map[string]any)
+	//for i := 0; i < len(out); i++ {
+	//	// result[fmt.Sprintf("return%d", i+1)] = out[i].Interface()
+	//	result[fm.RetNames[i]] = out[i].Interface()
+	//}
 
 	return result, nil
 }

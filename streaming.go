@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"cloud.google.com/go/vertexai/genai"
+	"github.com/google/generative-ai-go/genai"
 	"google.golang.org/api/iterator"
 )
 

@@ -9,9 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"cloud.google.com/go/vertexai/genai"
+	"github.com/google/generative-ai-go/genai"
 	"github.com/xyproto/env/v2"
-	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 )
 
@@ -19,7 +18,7 @@ type GeminiClient struct {
 	Client              *genai.Client
 	Functions           map[string]reflect.Value // For custom functions that the LLM can call
 	ModelName           string
-	MultiModalModelName string
+	APIKey              string
 	ProjectLocation     string
 	ProjectID           string
 	Tools               []*genai.Tool
@@ -28,6 +27,7 @@ type GeminiClient struct {
 	Temperature         float32
 	Trim                bool
 	Verbose             bool
+	FuncMetadataManager *FuncMetadataManager
 }
 
 const (
@@ -42,33 +42,24 @@ const (
 	defaultVerbose               = false
 )
 
-var (
-	ErrGoogleCloudProjectID = errors.New("please set GCP_PROJECT_ID or PROJECT_ID to your Google Cloud project ID")
-)
+var ErrGoogleCloudProjectID = errors.New("please set GCP_PROJECT_ID or PROJECT_ID to your Google Cloud project ID")
 
 func NewCustom(modelName, multiModalModelName, projectLocation, projectID string, temperature float32, timeout time.Duration) (*GeminiClient, error) {
 	gc := &GeminiClient{
-		ModelName:           env.Str("MODEL_NAME", modelName),
-		MultiModalModelName: env.Str("MULTI_MODAL_MODEL_NAME", multiModalModelName),
-		ProjectLocation:     env.StrAlt("GCP_LOCATION", "PROJECT_LOCATION", projectLocation),
-		ProjectID:           env.StrAlt("GCP_PROJECT_ID", "PROJECT_ID", projectID),
-		Timeout:             timeout,
-		Temperature:         temperature,
-		Tools:               []*genai.Tool{},
-		Functions:           make(map[string]reflect.Value),
-		Trim:                defaultTrim,
-		Verbose:             defaultVerbose,
-		Parts:               make([]genai.Part, 0),
+		ModelName:   env.Str("MODEL_NAME", modelName),
+		APIKey:      env.Str("GEMINI_KEY"),
+		Timeout:     timeout,
+		Temperature: temperature,
+		Tools:       []*genai.Tool{},
+		Functions:   make(map[string]reflect.Value),
+		Trim:        defaultTrim,
+		Verbose:     defaultVerbose,
+		Parts:       make([]genai.Part, 0),
+		FuncMetadataManager: &FuncMetadataManager{
+			Fms: make(map[string]*FuncMetadata),
+		},
 	}
-	if gc.ProjectID == "" {
-		return nil, ErrGoogleCloudProjectID
-	}
-	ctx := context.Background()
-	creds, err := google.FindDefaultCredentials(ctx, "https://www.googleapis.com/auth/cloud-platform")
-	if err != nil {
-		return nil, fmt.Errorf("failed to obtain default credentials: %v", err)
-	}
-	genaiClient, err := genai.NewClient(ctx, gc.ProjectID, gc.ProjectLocation, option.WithCredentials(creds))
+	genaiClient, err := genai.NewClient(context.Background(), option.WithAPIKey(gc.APIKey))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create genai client: %v", err)
 	}
@@ -155,8 +146,12 @@ func (gc *GeminiClient) MultiQuery(prompt string, base64Data, dataMimeType *stri
 	for _, candidate := range res.Candidates {
 		for _, part := range candidate.Content.Parts {
 			if funcall, ok := part.(genai.FunctionCall); ok {
+				fm := gc.FuncMetadataManager.Fms[funcall.Name]
+				if fm == nil {
+					return "", fmt.Errorf("function %s not found", funcall.Name)
+				}
 				// Invoke the user-defined function using reflection.
-				responseData, err := gc.invokeFunction(funcall.Name, funcall.Args)
+				responseData, err := gc.invokeFunction(funcall, fm)
 				if err != nil {
 					return "", fmt.Errorf("failed to handle function call: %v", err)
 				}
